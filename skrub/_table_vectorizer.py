@@ -17,6 +17,7 @@ from ._clean_categories import CleanCategories
 from ._clean_null_strings import CleanNullStrings
 from ._datetime_encoder import DatetimeEncoder
 from ._drop_if_too_many_nulls import DropIfTooManyNulls
+from ._drop_similar import DropSimilar
 from ._gap_encoder import GapEncoder
 from ._on_each_column import SingleColumnTransformer
 from ._select_cols import Drop
@@ -201,6 +202,12 @@ class TableVectorizer(TransformerMixin, BaseEstimator):
         this selection is disabled: no columns are dropped based on the number
         of null values they contain.
 
+    drop_similar : bool or dict, default=False
+        Whether to drop columns that are similar to others. If set to True, uses default
+        parameters for the DropSimilar transformer. If a dict is provided, it is passed
+        as keyword arguments to the DropSimilar transformer. DropSimilar removes redundant
+        columns based on correlations or other similarity metrics.
+
     n_jobs : int, default=None
         Number of jobs to run in parallel.
         ``None`` means 1 unless in a joblib ``parallel_backend`` context.
@@ -249,12 +256,18 @@ class TableVectorizer(TransformerMixin, BaseEstimator):
     all_outputs_ : list of str
         The names of the output columns.
 
+    dropped_similar_columns_ : list of str or None
+        The names of columns that were dropped because they were similar to other columns.
+        Only available if drop_similar is not False.
+
     See Also
     --------
     tabular_learner :
         A function that accepts a scikit-learn estimator and creates a pipeline
         combining a ``TableVectorizer``, optional missing value imputation and
         the provided estimator.
+    DropSimilar :
+        A transformer that removes redundant columns based on similarity metrics.
 
     Examples
     --------
@@ -424,6 +437,7 @@ class TableVectorizer(TransformerMixin, BaseEstimator):
         datetime=DATETIME_TRANSFORMER,
         specific_transformers=(),
         drop_null_fraction=1.0,
+        drop_similar=False,
         n_jobs=None,
     ):
         self.cardinality_threshold = cardinality_threshold
@@ -438,6 +452,7 @@ class TableVectorizer(TransformerMixin, BaseEstimator):
         self.specific_transformers = specific_transformers
         self.n_jobs = n_jobs
         self.drop_null_fraction = drop_null_fraction
+        self.drop_similar = drop_similar
 
     def fit(self, X, y=None):
         """Fit transformer.
@@ -550,6 +565,16 @@ class TableVectorizer(TransformerMixin, BaseEstimator):
 
         self._preprocessors = [CheckInputDataFrame()]
 
+        if self.drop_similar:
+            if isinstance(self.drop_similar, dict):
+                drop_similar_transformer = DropSimilar(**self.drop_similar)
+            else:
+                drop_similar_transformer = DropSimilar()
+
+            add_step(self._preprocessors, drop_similar_transformer, s.all())
+
+            self._drop_similar_transformer = self._preprocessors[-1]
+
         transformer_list = [CleanNullStrings()]
         transformer_list.append(DropIfTooManyNulls(self.drop_null_fraction))
 
@@ -603,8 +628,18 @@ class TableVectorizer(TransformerMixin, BaseEstimator):
         to_outputs = {col: [col] for col in input_names}
         to_steps = {col: [] for col in input_names}
         self.transformers_ = {}
+
+        if self.drop_similar:
+            self.dropped_similar_columns_ = [
+                col for col in self._preprocessors[0].feature_names_in_
+                if col not in input_names
+            ]
+        else:
+            self.dropped_similar_columns_ = None
         # [1:] because CheckInputDataFrame not included in all_processing_steps_
-        for step in self._preprocessors[1:]:
+        # If drop_similar is used, we also skip that by starting from proper index
+        start_idx = 2 if self.drop_similar else 1
+        for step in self._preprocessors[start_idx:]:
             for col, transformer in step.transformers_.items():
                 to_steps[col].append(transformer)
         for step in self._encoders + self._specific_transformers:
